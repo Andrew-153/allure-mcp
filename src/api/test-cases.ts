@@ -148,8 +148,202 @@ export function getTestCaseHistory(
   return client.get(`/api/testcase/${id}/history`, query);
 }
 
-export function getTestCaseScenario(client: AllureApiClient, id: number): Promise<unknown> {
+// Allure TestOps keeps TWO independent scenario storages per test case:
+// - legacy (GET/POST /api/testcase/{id}/scenario): flat step list, what every
+//   freshly-created test case uses by default.
+// - rich tree (GET /api/testcase/{id}/step, write via
+//   POST/PATCH/DELETE /api/testcase/step[/{id}]): a node graph used once a
+//   test case has been migrated (POST /api/testcase/{id}/migrate — irreversible).
+// The legacy endpoint silently returns {"steps": []} for any already-migrated
+// test case instead of erroring, so callers must read the rich tree to get
+// real content for migrated cases. Verified against project 135, 2026-09-04:
+// legacy /scenario on a migrated case returns {"steps":[]} while /step returns
+// the real content below.
+export interface ScenarioNode {
+  step: string;
+  expectedResult?: string;
+  steps?: ScenarioNode[];
+}
+
+interface RawStepNode {
+  id: number;
+  body: string;
+  bodyJson?: unknown;
+  children?: number[];
+  expectedResultId?: number;
+}
+
+interface RawStepTree {
+  root?: { children?: number[] };
+  scenarioSteps?: Record<string, RawStepNode>;
+}
+
+// The real expected-result text is not stored directly on expectedResultId —
+// that id points to a placeholder node (body literally "Expected Result")
+// whose own first child holds the actual text. Example live shape:
+//   step node:   { id: 8079, body: "...", expectedResultId: 8080 }
+//   ER wrapper:  { id: 8080, body: "Expected Result", children: [8081] }
+//   ER content:  { id: 8081, body: "Товар появился ..." }
+function buildScenarioNode(
+  nodes: Record<string, RawStepNode>,
+  id: number,
+): ScenarioNode | undefined {
+  const node = nodes[String(id)];
+  if (!node) {
+    return undefined;
+  }
+
+  let expectedResult: string | undefined;
+  if (node.expectedResultId !== undefined) {
+    const erWrapper = nodes[String(node.expectedResultId)];
+    const erContentId = erWrapper?.children?.[0];
+    const erContent = erContentId !== undefined ? nodes[String(erContentId)] : erWrapper;
+    expectedResult = erContent?.body;
+  }
+
+  const subSteps = node.children
+    ?.map((childId) => buildScenarioNode(nodes, childId))
+    .filter((child): child is ScenarioNode => child !== undefined);
+
+  return {
+    step: node.body,
+    ...(expectedResult !== undefined ? { expectedResult } : {}),
+    ...(subSteps && subSteps.length > 0 ? { steps: subSteps } : {}),
+  };
+}
+
+export async function getTestCaseRichSteps(
+  client: AllureApiClient,
+  id: number,
+): Promise<RawStepTree> {
+  return client.get(`/api/testcase/${id}/step`);
+}
+
+export async function getTestCaseScenario(
+  client: AllureApiClient,
+  id: number,
+): Promise<{ steps: ScenarioNode[] }> {
+  const tree = await getTestCaseRichSteps(client, id);
+  const nodes = tree.scenarioSteps ?? {};
+  const rootIds = tree.root?.children ?? [];
+  const steps = rootIds
+    .map((rootId) => buildScenarioNode(nodes, rootId))
+    .filter((node): node is ScenarioNode => node !== undefined);
+  return { steps };
+}
+
+export function getTestCaseScenarioLegacy(client: AllureApiClient, id: number): Promise<unknown> {
   return client.get(`/api/testcase/${id}/scenario`);
+}
+
+interface LegacyScenarioStep {
+  name: string;
+  expectedResult?: string;
+  steps?: LegacyScenarioStep[];
+}
+
+function toLegacyStep(node: ScenarioNode): LegacyScenarioStep {
+  return {
+    name: node.step,
+    ...(node.expectedResult !== undefined ? { expectedResult: node.expectedResult } : {}),
+    ...(node.steps && node.steps.length > 0 ? { steps: node.steps.map(toLegacyStep) } : {}),
+  };
+}
+
+export function setTestCaseScenarioLegacy(
+  client: AllureApiClient,
+  id: number,
+  steps: ScenarioNode[],
+): Promise<unknown> {
+  return client.post(`/api/testcase/${id}/scenario`, { steps: steps.map(toLegacyStep) });
+}
+
+export interface AddStepPayload {
+  testCaseId: number;
+  step: string;
+  expectedResult?: string;
+  afterId?: number;
+  parentId?: number;
+  withExpectedResult?: boolean;
+}
+
+// Write endpoints below are reconstructed from documented behavior, not
+// re-verified live (writing to a real project's scenario data was avoided
+// during recovery) — smoke-test against a scratch test case before relying
+// on them, per the standalone `node dist/index.js < requests.jsonl` pattern.
+export function addTestCaseStep(
+  client: AllureApiClient,
+  payload: AddStepPayload,
+): Promise<unknown> {
+  const { testCaseId, step, expectedResult, afterId, parentId, withExpectedResult } = payload;
+  return client.post("/api/testcase/step", {
+    testCaseId,
+    body: step,
+    ...(expectedResult !== undefined ? { expectedResult } : {}),
+    ...(afterId !== undefined ? { afterId } : {}),
+    ...(parentId !== undefined ? { parentId } : {}),
+    ...(withExpectedResult !== undefined ? { withExpectedResult } : {}),
+  });
+}
+
+export function updateTestCaseStep(
+  client: AllureApiClient,
+  stepId: number,
+  payload: { step?: string; expectedResult?: string },
+): Promise<unknown> {
+  return client.patch(`/api/testcase/step/${stepId}`, {
+    ...(payload.step !== undefined ? { body: payload.step } : {}),
+    ...(payload.expectedResult !== undefined ? { expectedResult: payload.expectedResult } : {}),
+  });
+}
+
+export function deleteTestCaseStep(client: AllureApiClient, stepId: number): Promise<unknown> {
+  return client.delete(`/api/testcase/step/${stepId}`);
+}
+
+// Irreversible: promotes the legacy scenario (if any) into the rich tree.
+// There is no way back to legacy afterward. Correct order confirmed by
+// direct reproduction: set the legacy scenario FIRST (so there's real
+// content to carry over), THEN migrate — migrating an empty scenario does
+// not reliably end up rich afterward.
+export function migrateTestCaseScenario(client: AllureApiClient, id: number): Promise<unknown> {
+  return client.post(`/api/testcase/${id}/migrate`);
+}
+
+export async function setTestCaseScenario(
+  client: AllureApiClient,
+  id: number,
+  steps: ScenarioNode[],
+): Promise<{ mode: "legacy" | "rich"; result: unknown }> {
+  const tree = await getTestCaseRichSteps(client, id);
+  const hasRichContent = (tree.root?.children?.length ?? 0) > 0;
+
+  if (!hasRichContent) {
+    const result = await setTestCaseScenarioLegacy(client, id, steps);
+    return { mode: "legacy", result };
+  }
+
+  const created: unknown[] = [];
+  let afterId: number | undefined;
+  for (const node of steps) {
+    if (node.steps && node.steps.length > 0) {
+      throw new Error(
+        "Nested sub-steps are not supported when writing to an already-migrated " +
+          "(rich-tree) test case — only flat, top-level steps. Use legacy mode " +
+          "(a not-yet-migrated test case) for nested steps.",
+      );
+    }
+    const stepResult = await addTestCaseStep(client, {
+      testCaseId: id,
+      step: node.step,
+      expectedResult: node.expectedResult,
+      afterId,
+    });
+    const createdId = asRecord(stepResult)?.id;
+    afterId = typeof createdId === "number" ? createdId : afterId;
+    created.push(stepResult);
+  }
+  return { mode: "rich", result: created };
 }
 
 export function getTestCaseTags(client: AllureApiClient, testCaseId: number): Promise<unknown> {

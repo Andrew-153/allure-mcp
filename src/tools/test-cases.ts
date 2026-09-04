@@ -345,7 +345,95 @@ export function createTestCaseTools(
     },
     {
       name: "get_test_case_scenario",
-      description: "Get scenario for a test case.",
+      description:
+        "Get scenario for a test case. Reads the rich-tree storage (/step), which is " +
+        "the one the UI actually renders for migrated test cases — the legacy " +
+        "/scenario endpoint silently returns empty steps for those. Returns " +
+        "{ steps: [{ step, expectedResult?, steps? }] }.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { id: { type: "number" } },
+        required: ["id"],
+      },
+    },
+    {
+      name: "set_test_case_scenario",
+      description:
+        "Write the scenario for a test case. Auto-detects whether the test case is still " +
+        "on legacy storage or has been migrated to the rich tree, and writes to whichever " +
+        "one is actually active — writing to the wrong storage on a migrated test case " +
+        "succeeds with no error but becomes invisible orphaned data. " +
+        "Nested steps[] are only supported in legacy mode (not-yet-migrated test cases); " +
+        "for an already-migrated test case, pass flat top-level steps only. " +
+        "Returns { mode: \"legacy\" | \"rich\", result }.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: { type: "number" },
+          steps: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                step: { type: "string" },
+                expectedResult: { type: "string" },
+                steps: { type: "array", items: { type: "object" } },
+              },
+              required: ["step"],
+            },
+          },
+        },
+        required: ["id", "steps"],
+      },
+    },
+    {
+      name: "add_test_case_step",
+      description:
+        "Add a single step to a migrated (rich-tree) test case's scenario. One node at a " +
+        "time — nested sub-steps are not supported here, only in legacy mode. " +
+        "Pass afterId to insert after a specific existing step, or omit to append.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          testCaseId: { type: "number" },
+          step: { type: "string" },
+          expectedResult: { type: "string" },
+          afterId: { type: "number", description: "Existing step id to insert after." },
+          parentId: { type: "number", description: "Parent step id, for a nested sub-step." },
+        },
+        required: ["testCaseId", "step"],
+      },
+    },
+    {
+      name: "update_test_case_step",
+      description: "Update a single existing step (by its rich-tree step id) in place.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          stepId: { type: "number" },
+          step: { type: "string" },
+          expectedResult: { type: "string" },
+        },
+        required: ["stepId"],
+      },
+    },
+    {
+      name: "delete_test_case_step",
+      description: "Delete a single step (by its rich-tree step id). Cascades to its children.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { stepId: { type: "number" } },
+        required: ["stepId"],
+      },
+    },
+    {
+      name: "migrate_test_case_scenario",
+      description:
+        "Migrate a test case's scenario from legacy storage to the rich tree. " +
+        "IRREVERSIBLE — there is no way back to legacy afterward. " +
+        "If you need the migrated content to be non-empty, call set_test_case_scenario " +
+        "FIRST (while still in legacy mode), then migrate — migrating an empty scenario " +
+        "does not reliably end up rich.",
       inputSchema: {
         type: "object" as const,
         properties: { id: { type: "number" } },
@@ -671,6 +759,40 @@ export function createTestCaseTools(
     get_test_case_scenario: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
       return api.getTestCaseScenario(client, getRequiredId(args));
+    },
+    set_test_case_scenario: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      const id = getRequiredId(args);
+      const steps = args.steps;
+      if (!Array.isArray(steps)) {
+        throw new Error("\"steps\" must be an array.");
+      }
+      return api.setTestCaseScenario(client, id, steps as api.ScenarioNode[]);
+    },
+    add_test_case_step: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      return api.addTestCaseStep(client, {
+        testCaseId: getRequiredId(args, "testCaseId"),
+        step: getRequiredString(args, "step"),
+        expectedResult: getOptionalString(args, "expectedResult"),
+        afterId: getOptionalNumber(args, "afterId"),
+        parentId: getOptionalNumber(args, "parentId"),
+      });
+    },
+    update_test_case_step: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      return api.updateTestCaseStep(client, getRequiredId(args, "stepId"), {
+        step: getOptionalString(args, "step"),
+        expectedResult: getOptionalString(args, "expectedResult"),
+      });
+    },
+    delete_test_case_step: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      return api.deleteTestCaseStep(client, getRequiredId(args, "stepId"));
+    },
+    migrate_test_case_scenario: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      return api.migrateTestCaseScenario(client, getRequiredId(args));
     },
     get_test_case_tags: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);

@@ -419,12 +419,16 @@ export function createTestCaseTools(
     {
       name: "set_test_case_scenario",
       description:
-        "Write the scenario for a test case. Auto-detects whether the test case is still " +
-        "on legacy storage or has been migrated to the rich tree, and writes to whichever " +
-        "one is actually active — writing to the wrong storage on a migrated test case " +
-        "succeeds with no error but becomes invisible orphaned data. " +
-        "Nested steps[] are only supported in legacy mode (not-yet-migrated test cases); " +
-        "for an already-migrated test case, pass flat top-level steps only. " +
+        "Write the scenario for a test case. Priority target for NEW content is the rich " +
+        "tree: a blank test case (nothing in either storage) writes straight to rich, an " +
+        "already-migrated test case writes to rich, and only a not-yet-migrated test case " +
+        "that ALREADY has legacy content keeps writing to legacy (to avoid orphaning that " +
+        "content — migrate deliberately first via migrate_test_case_scenario if you want it " +
+        "on rich instead). " +
+        "Nested steps[] are only supported in legacy mode. Rich-tree writes are flat, " +
+        "top-level steps only, and rich-tree test cases have exactly ONE overall Expected " +
+        "Result field (not one per step) — put at most one expectedResult across all steps " +
+        "(conventionally on the last one); more than one throws. " +
         "Returns { mode: \"legacy\" | \"rich\", result }.",
       inputSchema: {
         type: "object" as const,
@@ -451,13 +455,14 @@ export function createTestCaseTools(
       description:
         "Add a single step to a migrated (rich-tree) test case's scenario. One node at a " +
         "time — nested sub-steps are not supported here, only in legacy mode. " +
-        "Pass afterId to insert after a specific existing step, or omit to append.",
+        "Pass afterId to insert after a specific existing step, or omit to append. " +
+        "No expectedResult here — rich-tree test cases have exactly one overall Expected " +
+        "Result on the test case itself; use set_test_case_expected_result for that.",
       inputSchema: {
         type: "object" as const,
         properties: {
           testCaseId: { type: "number" },
           step: { type: "string" },
-          expectedResult: { type: "string" },
           afterId: { type: "number", description: "Existing step id to insert after." },
           parentId: { type: "number", description: "Parent step id, for a nested sub-step." },
         },
@@ -466,15 +471,16 @@ export function createTestCaseTools(
     },
     {
       name: "update_test_case_step",
-      description: "Update a single existing step (by its rich-tree step id) in place.",
+      description:
+        "Update a single existing step's text (by its rich-tree step id) in place. " +
+        "No expectedResult here — see set_test_case_expected_result.",
       inputSchema: {
         type: "object" as const,
         properties: {
           stepId: { type: "number" },
           step: { type: "string" },
-          expectedResult: { type: "string" },
         },
-        required: ["stepId"],
+        required: ["stepId", "step"],
       },
     },
     {
@@ -484,6 +490,22 @@ export function createTestCaseTools(
         type: "object" as const,
         properties: { stepId: { type: "number" } },
         required: ["stepId"],
+      },
+    },
+    {
+      name: "set_test_case_expected_result",
+      description:
+        "Set the one overall Expected Result for a test case — a plain field on the test " +
+        "case itself, separate from and unrelated to its scenario steps. Confirmed live: " +
+        "the standard \"regular\"-style test case UI shows exactly one Expected Result box " +
+        "regardless of how many scenario steps exist.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          id: { type: "number" },
+          expectedResult: { type: "string" },
+        },
+        required: ["id", "expectedResult"],
       },
     },
     {
@@ -918,7 +940,6 @@ export function createTestCaseTools(
       return api.addTestCaseStep(client, {
         testCaseId: getRequiredId(args, "testCaseId"),
         step: getRequiredString(args, "step"),
-        expectedResult: getOptionalString(args, "expectedResult"),
         afterId: getOptionalNumber(args, "afterId"),
         parentId: getOptionalNumber(args, "parentId"),
       });
@@ -926,13 +947,20 @@ export function createTestCaseTools(
     update_test_case_step: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
       return api.updateTestCaseStep(client, getRequiredId(args, "stepId"), {
-        step: getOptionalString(args, "step"),
-        expectedResult: getOptionalString(args, "expectedResult"),
+        step: getRequiredString(args, "step"),
       });
     },
     delete_test_case_step: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
       return api.deleteTestCaseStep(client, getRequiredId(args, "stepId"));
+    },
+    set_test_case_expected_result: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      return api.setTestCaseExpectedResult(
+        client,
+        getRequiredId(args),
+        getRequiredString(args, "expectedResult"),
+      );
     },
     migrate_test_case_scenario: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);

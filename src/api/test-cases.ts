@@ -332,6 +332,21 @@ export async function getTestCaseScenario(
     const steps = rootIds
       .map((rootId) => buildScenarioNode(nodes, rootId))
       .filter((node): node is ScenarioNode => node !== undefined);
+
+    // "regular"-style test cases keep their one overall Expected Result on
+    // the test case itself (see setTestCaseExpectedResult), not nested in
+    // the step tree. Surface it on the last step so scenario reads round-
+    // trip with what setTestCaseScenario writes. Older test cases that DO
+    // carry a genuine per-step expectedResultId (from buildScenarioNode)
+    // keep that value untouched.
+    const last = steps[steps.length - 1];
+    if (last && last.expectedResult === undefined) {
+      const testCase = (await getTestCase(client, id)) as { expectedResult?: string };
+      if (testCase.expectedResult) {
+        last.expectedResult = testCase.expectedResult;
+      }
+    }
+
     return { steps };
   }
 
@@ -376,40 +391,66 @@ export function setTestCaseScenarioLegacy(
 export interface AddStepPayload {
   testCaseId: number;
   step: string;
-  expectedResult?: string;
   afterId?: number;
   parentId?: number;
-  withExpectedResult?: boolean;
 }
 
-// Write endpoints below are reconstructed from documented behavior, not
-// re-verified live (writing to a real project's scenario data was avoided
-// during recovery) — smoke-test against a scratch test case before relying
-// on them, per the standalone `node dist/index.js < requests.jsonl` pattern.
+// Confirmed live via HTTP Toolkit/Playwright network capture on the real
+// UI (2026-09-07, case 15054): the create-step call is
+// POST /api/testcase/step?afterId=<id>&withExpectedResult=false with a
+// PLAIN body of { testCaseId, bodyJson: <ProseMirror doc> } — afterId and
+// withExpectedResult are QUERY params, not body fields, and the step text
+// goes in structured bodyJson (a flat "body" string was NOT what the real
+// UI sends, though the API silently accepted it too in earlier testing).
+// There is no per-step expectedResult on this call: the standard "regular"
+// style UI has exactly ONE overall Expected Result field on the TEST CASE
+// itself (see setTestCaseExpectedResult), not one per step. The nested
+// per-step expectedResultId structure seen on some older test cases
+// (5865/5866/5867) is not reproducible through this endpoint with
+// withExpectedResult=true — that was left at false throughout, and this
+// fork's writers only build the always-false shape below.
+function toBodyJson(text: string) {
+  return { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] };
+}
+
 export function addTestCaseStep(
   client: AllureApiClient,
   payload: AddStepPayload,
 ): Promise<unknown> {
-  const { testCaseId, step, expectedResult, afterId, parentId, withExpectedResult } = payload;
-  return client.post("/api/testcase/step", {
-    testCaseId,
-    body: step,
-    ...(expectedResult !== undefined ? { expectedResult } : {}),
-    ...(afterId !== undefined ? { afterId } : {}),
-    ...(parentId !== undefined ? { parentId } : {}),
-    ...(withExpectedResult !== undefined ? { withExpectedResult } : {}),
-  });
+  const { testCaseId, step, afterId, parentId } = payload;
+  return client.post(
+    "/api/testcase/step",
+    { testCaseId, bodyJson: toBodyJson(step) },
+    {
+      withExpectedResult: false,
+      ...(afterId !== undefined ? { afterId } : {}),
+      ...(parentId !== undefined ? { parentId } : {}),
+    },
+  );
 }
 
+// expectedResult is intentionally NOT supported here — PATCHing it onto a
+// step node fails live with 400 "step.onlyonedetail" (confirmed 2026-09-07).
+// Expected result for a "regular"-style test case lives on the test case
+// itself; see setTestCaseExpectedResult.
 export function updateTestCaseStep(
   client: AllureApiClient,
   stepId: number,
-  payload: { step?: string; expectedResult?: string },
+  payload: { step: string },
 ): Promise<unknown> {
-  return client.patch(`/api/testcase/step/${stepId}`, {
-    ...(payload.step !== undefined ? { body: payload.step } : {}),
-    ...(payload.expectedResult !== undefined ? { expectedResult: payload.expectedResult } : {}),
-  });
+  return client.patch(`/api/testcase/step/${stepId}`, { bodyJson: toBodyJson(payload.step) });
+}
+
+// The ONE overall expected result for a "regular"-style test case — a
+// plain field on the test case itself (PATCH /api/testcase/{id}), entirely
+// separate from the step tree. Confirmed live via the real UI's "Expected
+// result" section, which stays a single box regardless of step count.
+export function setTestCaseExpectedResult(
+  client: AllureApiClient,
+  id: number,
+  expectedResult: string,
+): Promise<unknown> {
+  return client.patch(`/api/testcase/${id}`, { id, expectedResult });
 }
 
 export function deleteTestCaseStep(client: AllureApiClient, stepId: number): Promise<unknown> {
@@ -425,6 +466,64 @@ export function migrateTestCaseScenario(client: AllureApiClient, id: number): Pr
   return client.post(`/api/testcase/${id}/migrate`);
 }
 
+async function writeStepsToRichTree(
+  client: AllureApiClient,
+  id: number,
+  steps: ScenarioNode[],
+): Promise<unknown[]> {
+  const created: unknown[] = [];
+  let afterId: number | undefined;
+  for (const node of steps) {
+    if (node.steps && node.steps.length > 0) {
+      throw new Error(
+        "Nested sub-steps are not supported when writing to the rich tree — only flat, " +
+          "top-level steps. Use a not-yet-migrated test case (legacy storage) for nested steps.",
+      );
+    }
+    const stepResult = await addTestCaseStep(client, {
+      testCaseId: id,
+      step: node.step,
+      afterId,
+    });
+    const createdId = asRecord(stepResult)?.id;
+    afterId = typeof createdId === "number" ? createdId : afterId;
+    created.push(stepResult);
+  }
+
+  // A "regular"-style test case has exactly one overall Expected Result
+  // field on the TEST CASE itself, not one per rich-tree step (confirmed
+  // live via the actual UI, 2026-09-07) — collapse whatever expectedResult
+  // the caller attached to individual steps into that one field.
+  const expectedResults = steps
+    .map((s) => s.expectedResult)
+    .filter((er): er is string => Boolean(er));
+  if (expectedResults.length > 1) {
+    throw new Error(
+      "Multiple steps each with their own expectedResult are not supported when writing " +
+        "to the rich tree — it has exactly one overall Expected Result field for the whole " +
+        "test case. Put a single expectedResult on the last step, or use a not-yet-migrated " +
+        "test case (legacy storage) for true per-step results.",
+    );
+  }
+  if (expectedResults.length === 1) {
+    await setTestCaseExpectedResult(client, id, expectedResults[0]);
+  }
+
+  return created;
+}
+
+// Priority target for new content is the rich tree — legacy is kept as a
+// write target only to avoid orphaning content a test case already has
+// there (writing fresh content to rich while stale content sits in legacy
+// would leave the two storages diverged, the exact confusion this file
+// exists to prevent). So:
+//   - already migrated (rich has content)      -> write to rich.
+//   - blank slate (neither storage has content) -> write to rich (new
+//     default, per project policy: prefer rich-tree for new content).
+//   - not migrated but legacy already has content -> still write to legacy;
+//     migrating this test case first is a deliberate, separate decision
+//     (call migrate_test_case_scenario explicitly), not an automatic side
+//     effect of "set".
 export async function setTestCaseScenario(
   client: AllureApiClient,
   id: number,
@@ -433,32 +532,19 @@ export async function setTestCaseScenario(
   const tree = await getTestCaseRichSteps(client, id);
   const hasRichContent = (tree.root?.children?.length ?? 0) > 0;
 
-  if (!hasRichContent) {
-    const result = await setTestCaseScenarioLegacy(client, id, steps);
-    return { mode: "legacy", result };
+  if (hasRichContent) {
+    return { mode: "rich", result: await writeStepsToRichTree(client, id, steps) };
   }
 
-  const created: unknown[] = [];
-  let afterId: number | undefined;
-  for (const node of steps) {
-    if (node.steps && node.steps.length > 0) {
-      throw new Error(
-        "Nested sub-steps are not supported when writing to an already-migrated " +
-          "(rich-tree) test case — only flat, top-level steps. Use legacy mode " +
-          "(a not-yet-migrated test case) for nested steps.",
-      );
-    }
-    const stepResult = await addTestCaseStep(client, {
-      testCaseId: id,
-      step: node.step,
-      expectedResult: node.expectedResult,
-      afterId,
-    });
-    const createdId = asRecord(stepResult)?.id;
-    afterId = typeof createdId === "number" ? createdId : afterId;
-    created.push(stepResult);
+  const legacy = (await getTestCaseScenarioLegacy(client, id)) as { steps?: unknown[] };
+  const hasLegacyContent = Array.isArray(legacy.steps) && legacy.steps.length > 0;
+
+  if (!hasLegacyContent) {
+    return { mode: "rich", result: await writeStepsToRichTree(client, id, steps) };
   }
-  return { mode: "rich", result: created };
+
+  const result = await setTestCaseScenarioLegacy(client, id, steps);
+  return { mode: "legacy", result };
 }
 
 export function getTestCaseTags(client: AllureApiClient, testCaseId: number): Promise<unknown> {

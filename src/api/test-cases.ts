@@ -587,6 +587,44 @@ export function bulkSetTestCaseCustomFields(
   });
 }
 
+// Atomic replace of custom-field values for one or more test cases. Unlike
+// add/remove, this single call drops the previous values of the listed
+// custom fields and substitutes them with the new ones — required when the
+// custom field is singleSelect and `add` would otherwise leave the old
+// value dangling. See /api/v2/test-case/bulk/cfv/replace.
+export function replaceTestCaseCustomFields(
+  client: AllureApiClient,
+  projectId: number,
+  testCaseIds: number[],
+  payload: unknown,
+): Promise<unknown> {
+  const cfv = normalizeCustomFieldBulkAddPayload(payload);
+  return client.post("/api/v2/test-case/bulk/cfv/replace", {
+    selection: {
+      projectId,
+      testCasesInclude: testCaseIds,
+      inverted: false,
+    },
+    cfv,
+  });
+}
+
+// Convenience wrapper for the most common case: set one custom field on
+// one test case to a single value. Equivalent to replace with a one-element
+// payload, but easier to call from agents that only need to flip a single
+// enum-like field (Тайминг, Приоритеты, etc.).
+export async function replaceSingleTestCaseCustomFieldValue(
+  client: AllureApiClient,
+  projectId: number,
+  testCaseId: number,
+  customFieldId: number,
+  valueId: number,
+): Promise<unknown> {
+  return replaceTestCaseCustomFields(client, projectId, [testCaseId], [
+    { customField: { id: customFieldId }, values: [{ id: valueId }] },
+  ]);
+}
+
 export function deleteCustomFieldValue(
   client: AllureApiClient,
   valueId: number,

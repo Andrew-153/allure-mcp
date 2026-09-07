@@ -680,6 +680,64 @@ export function createTestCaseTools(
       },
     },
     {
+      name: "replace_test_case_custom_fields",
+      description:
+        "Atomically replace custom-field values on one or more test cases. " +
+        "Unlike set_test_case_custom_fields (which only adds), this drops the previous " +
+        "value(s) of the listed custom fields and substitutes them with the new ones. " +
+        "Use this for singleSelect fields (Тайминг, Приоритеты, etc.) where the old value " +
+        "would otherwise dangle after an add. " +
+        "Payload format: [{ customField: { id }, values: [{ id|name }] }] or " +
+        "[{ id|name, customField: { id } }]. " +
+        "Either testCaseId or testCaseIds must be provided.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          projectId: { type: "number" },
+          projectName: {
+            type: "string",
+            description: "Project name (alternative to projectId).",
+          },
+          testCaseId: { type: "number", description: "Single test case ID." },
+          testCaseIds: {
+            type: "array",
+            items: { type: "number" },
+            description: "Multiple test case IDs.",
+          },
+          payload: { type: "array", items: { type: "object" } },
+        },
+        required: ["payload"],
+      },
+    },
+    {
+      name: "replace_test_case_custom_field_value",
+      description:
+        "Convenience wrapper for the most common custom-field update: set a single " +
+        "custom field on a single test case to a single value, atomically. " +
+        "Ideal for agents that only need to flip one enum-like field such as " +
+        "Тайминг or Приоритеты.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          projectId: { type: "number" },
+          projectName: {
+            type: "string",
+            description: "Project name (alternative to projectId).",
+          },
+          testCaseId: { type: "number", description: "Test case ID." },
+          customFieldId: {
+            type: "number",
+            description: "Custom field ID (e.g. 35 for Тайминг, 1 for Приоритеты).",
+          },
+          valueId: {
+            type: "number",
+            description: "Target custom-field value ID.",
+          },
+        },
+        required: ["testCaseId", "customFieldId", "valueId"],
+      },
+    },
+    {
       name: "delete_custom_field_value",
       description:
         "Delete a custom field value definition. The value must not be in use by any test cases. " +
@@ -949,6 +1007,23 @@ export function createTestCaseTools(
       }
 
       return api.bulkSetTestCaseCustomFields(client, projectId, testCaseIds, args.payload);
+    },
+    replace_test_case_custom_fields: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      const projectId = await resolveProjectId(args, client);
+      const testCaseIds = getBulkIdList(args, "testCaseId", "testCaseIds", "test case");
+      return api.replaceTestCaseCustomFields(client, projectId, testCaseIds, args.payload);
+    },
+    replace_test_case_custom_field_value: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      const projectId = await resolveProjectId(args, client);
+      return api.replaceSingleTestCaseCustomFieldValue(
+        client,
+        projectId,
+        getRequiredNumber(args, "testCaseId"),
+        getRequiredNumber(args, "customFieldId"),
+        getRequiredNumber(args, "valueId"),
+      );
     },
     delete_custom_field_value: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);

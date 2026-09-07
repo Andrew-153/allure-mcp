@@ -165,7 +165,12 @@ export function createTestCaseTools(
   const tools = [
     {
       name: "list_test_cases",
-      description: "List test cases for a project.",
+      description:
+        "List test cases for a project. \"search\" does a real name-contains filter — " +
+        "internally rewritten into search_test_cases's RQL (name ~= \"...\") since the " +
+        "plain list endpoint's own search param is a no-op on this Allure instance " +
+        "(confirmed live: it silently returns the full unfiltered list regardless of the " +
+        "value passed). Omit \"search\" for a plain paginated listing.",
       inputSchema: {
         type: "object" as const,
         properties: {
@@ -191,8 +196,13 @@ export function createTestCaseTools(
         'cf["Feature"] is empty — field not set; ' +
         'not cf["Feature"] = "Auth" — negation; ' +
         'cf["Suite"] = "API" and cf["Feature"] is empty — combined conditions; ' +
-        "name ~ \"login\" — name contains substring; " +
+        'name ~= "login" — name contains substring; ' +
         "tag = \"smoke\" — filter by tag. " +
+        "Confirmed live on this instance: the contains operator is ~= — plain ~ (no =) " +
+        'always fails with 400 "invalid AQL" regardless of the query text, on any field. ' +
+        "Also confirmed NOT valid RQL fields here (400 on their own): automated, " +
+        "isAutomated, manual — this AQL grammar doesn't expose an automation-status field; " +
+        "there may be others untested. " +
         "Use page/size for pagination; the API may truncate large result sets.",
       inputSchema: {
         type: "object" as const,
@@ -205,8 +215,9 @@ export function createTestCaseTools(
           rql: {
             type: "string",
             description:
-              "RQL query string. Operators: = (equals), ~ (contains), is empty (field not set), " +
-              "not (negation), and/or (combinators). " +
+              'RQL query string. Operators: = (equals), ~= (contains — NOT bare ~, that ' +
+              "always 400s on this instance), is empty (field not set), not (negation), " +
+              "and/or (combinators). " +
               'Custom field syntax: cf["FieldName"]. Example: cf["Feature"] = "Auth"',
           },
           page: { type: "number", description: "Page number (0-based)." },
@@ -842,8 +853,17 @@ export function createTestCaseTools(
     list_test_cases: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
       const projectId = await resolveProjectId(args, client);
+      const search = getOptionalString(args, "search");
+      if (search !== undefined) {
+        // /api/testcase's own "search" query param is a confirmed no-op on this
+        // instance (silently returns the unfiltered list) — route through the
+        // RQL search endpoint instead, which actually filters.
+        const escaped = search.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+        return api.searchTestCases(client, projectId, `name ~= "${escaped}"`, {
+          ...pickPagination(args),
+        });
+      }
       return api.listTestCases(client, projectId, {
-        search: getOptionalString(args, "search"),
         filterId: getOptionalNumber(args, "filterId"),
         ...pickPagination(args),
       });

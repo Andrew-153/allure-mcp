@@ -689,7 +689,9 @@ export function createTestCaseTools(
         "would otherwise dangle after an add. " +
         "Payload format: [{ customField: { id }, values: [{ id|name }] }] or " +
         "[{ id|name, customField: { id } }]. " +
-        "Either testCaseId or testCaseIds must be provided.",
+        "Either testCaseId or testCaseIds must be provided. " +
+        "Tries per-test-case POST /api/testcase/{id}/cfv first, then /api/v2/test-case/bulk/cfv/replace, " +
+        "then /api/v2/test-case/bulk/cfv/set, then a non-atomic remove+add fallback.",
       inputSchema: {
         type: "object" as const,
         properties: {

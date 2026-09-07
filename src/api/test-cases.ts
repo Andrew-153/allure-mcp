@@ -587,12 +587,45 @@ export function bulkSetTestCaseCustomFields(
   });
 }
 
+// Flatten the normalized bulk payload into the per-test-case
+// `CustomFieldValueWithCfDto` shape that `POST /api/testcase/{id}/cfv`
+// expects on this Allure build. The endpoint takes an ArrayList of
+// `{customField:{id}, id? | name?}` — no `values` wrapper, no selection.
+// `id` is the existing value id; `name` is used only when the caller does
+// not know the value id (server resolves by name). When both are present
+// the server picks `id`.
+function toPerTestCaseCfvArray(cfv: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const row of cfv) {
+    const cf = row.customField as { id: number } | undefined;
+    if (!cf || typeof cf.id !== "number") continue;
+    const values = Array.isArray(row.values) ? row.values : [];
+    if (values.length === 0) {
+      out.push({ customField: { id: cf.id }, id: (row as { id?: number }).id });
+      continue;
+    }
+    for (const v of values) {
+      const flat: Record<string, unknown> = { customField: { id: cf.id } };
+      if (typeof (v as { id?: number }).id === "number") flat.id = (v as { id: number }).id;
+      if (typeof (v as { name?: string }).name === "string") flat.name = (v as { name: string }).name;
+      out.push(flat);
+    }
+  }
+  return out;
+}
+
 // Atomic replace of custom-field values for one or more test cases. Unlike
 // add/remove, this single call drops the previous values of the listed
 // custom fields and substitutes them with the new ones — required when the
 // custom field is singleSelect and `add` would otherwise leave the old
-// value dangling. Tries /replace first, then /set (different Allure
-// builds ship with different verbs for the same operation).
+// value dangling. Tries, in order:
+//   1. POST /api/testcase/{id}/cfv with ArrayList<CustomFieldValueWithCfDto>
+//      — confirmed working on lukasoft.testops.cloud; per-test-case so we
+//      iterate over `testCaseIds` and merge results.
+//   2. POST /api/v2/test-case/bulk/cfv/replace (different Allure builds).
+//   3. POST /api/v2/test-case/bulk/cfv/set (yet other builds).
+//   4. remove_test_case_custom_fields + set_test_case_custom_fields as a
+//      non-atomic but always-available last resort.
 export async function replaceTestCaseCustomFields(
   client: AllureApiClient,
   projectId: number,
@@ -600,6 +633,31 @@ export async function replaceTestCaseCustomFields(
   payload: unknown,
 ): Promise<unknown> {
   const cfv = normalizeCustomFieldBulkAddPayload(payload);
+  if (cfv.length === 0) {
+    throw new Error("replaceTestCaseCustomFields: payload is empty after normalization.");
+  }
+
+  // 1) Per-test-case POST /api/testcase/{id}/cfv (works on lukasoft).
+  try {
+    const perTcBody = toPerTestCaseCfvArray(cfv);
+    if (perTcBody.length > 0) {
+      const results: unknown[] = [];
+      for (const testCaseId of testCaseIds) {
+        const r = await client.post(`/api/testcase/${testCaseId}/cfv`, perTcBody);
+        results.push(r);
+      }
+      return testCaseIds.length === 1 ? results[0] : results;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Only fall through if the endpoint really is missing; other errors
+    // (validation, network) should surface.
+    if (!/404/.test(message)) {
+      throw error;
+    }
+  }
+
+  // 2/3) Bulk endpoints from other Allure builds.
   const body = {
     selection: {
       projectId,
@@ -608,15 +666,26 @@ export async function replaceTestCaseCustomFields(
     },
     cfv,
   };
-  try {
-    return await client.post("/api/v2/test-case/bulk/cfv/replace", body);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/404/.test(message)) {
-      throw error;
+  for (const path of [
+    "/api/v2/test-case/bulk/cfv/replace",
+    "/api/v2/test-case/bulk/cfv/set",
+  ]) {
+    try {
+      return await client.post(path, body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/404/.test(message)) throw error;
     }
   }
-  return client.post("/api/v2/test-case/bulk/cfv/set", body);
+
+  // 4) Non-atomic fallback: drop the listed custom fields, then add the
+  //    new values. Safe because add is the canonical "set" on every
+  //    Allure build, and remove takes only the field ids.
+  const customFieldIds = Array.from(
+    new Set(cfv.map((row) => (row.customField as { id: number }).id)),
+  );
+  await removeCustomFieldsFromTestCases(client, projectId, testCaseIds, customFieldIds);
+  return bulkSetTestCaseCustomFields(client, projectId, testCaseIds, cfv);
 }
 
 // Convenience wrapper for the most common case: set one custom field on

@@ -625,6 +625,40 @@ function toPerTestCaseCfvArray(cfv: Array<Record<string, unknown>>): Array<Recor
   return out;
 }
 
+interface CurrentCfvEntry {
+  customField?: { id?: number };
+  id?: number;
+  name?: string;
+}
+
+// POST /api/testcase/{id}/cfv (path 1 below) replaces the test case's ENTIRE
+// custom-field set with whatever array is sent — it is NOT a per-field
+// patch. Confirmed by direct reproduction on case 15054 (2026-09-07):
+// sending only an Epic value silently deleted that test case's Component
+// and Feature values. So we always read the test case's current full set
+// first and merge the requested change into it — every field the caller
+// didn't ask to touch is carried over unchanged; only the customField ids
+// present in `requestedByField` are replaced.
+function mergeCfvForTestCase(
+  current: unknown,
+  requestedByField: Map<number, Array<Record<string, unknown>>>,
+): Array<Record<string, unknown>> {
+  const currentList = Array.isArray(current) ? (current as CurrentCfvEntry[]) : [];
+  const kept = currentList
+    .filter((entry) => {
+      const fieldId = entry.customField?.id;
+      return typeof fieldId === "number" && !requestedByField.has(fieldId);
+    })
+    .map((entry) => ({
+      customField: { id: (entry.customField as { id: number }).id },
+      ...(entry.id !== undefined ? { id: entry.id } : {}),
+      ...(entry.name !== undefined ? { name: entry.name } : {}),
+    }));
+
+  const requested = Array.from(requestedByField.values()).flat();
+  return [...kept, ...requested];
+}
+
 // Atomic replace of custom-field values for one or more test cases. Unlike
 // add/remove, this single call drops the previous values of the listed
 // custom fields and substitutes them with the new ones — required when the
@@ -632,11 +666,17 @@ function toPerTestCaseCfvArray(cfv: Array<Record<string, unknown>>): Array<Recor
 // value dangling. Tries, in order:
 //   1. POST /api/testcase/{id}/cfv with ArrayList<CustomFieldValueWithCfDto>
 //      — confirmed working on lukasoft.testops.cloud; per-test-case so we
-//      iterate over `testCaseIds` and merge results.
+//      iterate over `testCaseIds`, merging each one's current custom fields
+//      (see mergeCfvForTestCase) so untouched fields survive the call.
 //   2. POST /api/v2/test-case/bulk/cfv/replace (different Allure builds).
 //   3. POST /api/v2/test-case/bulk/cfv/set (yet other builds).
+//      NOTE: 2/3 have never actually fired on this instance (404 here), so
+//      it's unverified whether they share path 1's whole-set-replace
+//      behavior. If one of them ever activates on another Allure build,
+//      re-check for the same data-loss risk before trusting it blindly.
 //   4. remove_test_case_custom_fields + set_test_case_custom_fields as a
-//      non-atomic but always-available last resort.
+//      non-atomic but always-available last resort — inherently scoped to
+//      just the listed custom field ids, no merge needed.
 export async function replaceTestCaseCustomFields(
   client: AllureApiClient,
   projectId: number,
@@ -648,17 +688,28 @@ export async function replaceTestCaseCustomFields(
     throw new Error("replaceTestCaseCustomFields: payload is empty after normalization.");
   }
 
+  const requestedByField = new Map<number, Array<Record<string, unknown>>>();
+  for (const row of cfv) {
+    const fieldId = (row.customField as { id: number }).id;
+    const list = requestedByField.get(fieldId) ?? [];
+    list.push(row);
+    requestedByField.set(fieldId, list);
+  }
+
   // 1) Per-test-case POST /api/testcase/{id}/cfv (works on lukasoft).
   try {
-    const perTcBody = toPerTestCaseCfvArray(cfv);
-    if (perTcBody.length > 0) {
-      const results: unknown[] = [];
-      for (const testCaseId of testCaseIds) {
-        const r = await client.post(`/api/testcase/${testCaseId}/cfv`, perTcBody);
-        results.push(r);
+    const results: unknown[] = [];
+    for (const testCaseId of testCaseIds) {
+      const current = await getTestCaseCustomFields(client, testCaseId, projectId);
+      const merged = mergeCfvForTestCase(current, requestedByField);
+      const perTcBody = toPerTestCaseCfvArray(merged);
+      if (perTcBody.length === 0) {
+        throw new Error("404: no fields to write after merge");
       }
-      return testCaseIds.length === 1 ? results[0] : results;
+      const r = await client.post(`/api/testcase/${testCaseId}/cfv`, perTcBody);
+      results.push(r);
     }
+    return testCaseIds.length === 1 ? results[0] : results;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Only fall through if the endpoint really is missing; other errors

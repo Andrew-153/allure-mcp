@@ -687,6 +687,9 @@ export function createTestCaseTools(
         "value(s) of the listed custom fields and substitutes them with the new ones. " +
         "Use this for singleSelect fields (Тайминг, Приоритеты, etc.) where the old value " +
         "would otherwise dangle after an add. " +
+        "Only the custom fields listed in payload are changed — every other custom field " +
+        "already on the test case is read back and carried over untouched, since the " +
+        "underlying per-test-case endpoint would otherwise silently wipe them. " +
         "Payload format: [{ customField: { id }, values: [{ id|name }] }] or " +
         "[{ id|name, customField: { id } }]. " +
         "Either testCaseId or testCaseIds must be provided. " +

@@ -217,6 +217,65 @@ export function createTestCaseTools(
       },
     },
     {
+      name: "list_tree_nodes",
+      description:
+        "List tree nodes (groups + leaf test cases) under a tree on the Allure TestOps UI " +
+        "search-tree endpoint. This is the endpoint the Allure UI itself uses for the test-cases " +
+        "tree, and it accepts a base64-encoded structured 'content' filter, which the legacy " +
+        "/api/testcase/__search (RQL) endpoint refuses with 'invalid AQL' on some instances. " +
+        "Returns nodes with type GROUP (children folders) and LEAF (with testCaseId).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          projectId: { type: "number" },
+          projectName: {
+            type: "string",
+            description: "Project name (alternative to projectId).",
+          },
+          treeId: {
+            type: "number",
+            description: "Tree ID (visible in the Allure UI URL as ?treeId=…).",
+          },
+          parentNodeId: {
+            type: "number",
+            description: "Optional folder node id; omit to fetch root-level nodes.",
+          },
+          search: {
+            type: "string",
+            description:
+              "Free-text filter. The endpoint searches test case content (name, steps, custom fields).",
+          },
+          page: { type: "number", description: "Page number (0-based)." },
+          size: { type: "number", description: "Page size (default 100)." },
+          deleted: { type: "boolean", description: "Include deleted (default false)." },
+        },
+        required: ["treeId"],
+      },
+    },
+    {
+      name: "count_tree_leaves",
+      description:
+        "Count filtered leaf test cases for a tree on the same endpoint the Allure UI uses. " +
+        "Returns { filtered, total }. Uses the same base64 'content' filter as list_tree_nodes.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          projectId: { type: "number" },
+          projectName: {
+            type: "string",
+            description: "Project name (alternative to projectId).",
+          },
+          treeId: { type: "number", description: "Tree ID (from the Allure UI URL)." },
+          search: {
+            type: "string",
+            description: "Free-text filter; same semantics as list_tree_nodes.",
+          },
+          deleted: { type: "boolean", description: "Include deleted (default false)." },
+        },
+        required: ["treeId"],
+      },
+    },
+    {
       name: "get_test_case",
       description: "Get a test case by ID.",
       inputSchema: {
@@ -708,6 +767,27 @@ export function createTestCaseTools(
       const projectId = await resolveProjectId(args, client);
       return api.searchTestCases(client, projectId, getRequiredString(args, "rql"), {
         ...pickPagination(args),
+      });
+    },
+    list_tree_nodes: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      const projectId = await resolveProjectId(args, client);
+      return api.listTreeNodes(client, projectId, {
+        treeId: getRequiredNumber(args, "treeId"),
+        parentNodeId: getOptionalNumber(args, "parentNodeId"),
+        search: getOptionalString(args, "search"),
+        page: getOptionalNumber(args, "page"),
+        size: getOptionalNumber(args, "size"),
+        deleted: getOptionalBoolean(args, "deleted"),
+      });
+    },
+    count_tree_leaves: async (rawArgs: unknown) => {
+      const args = asObject(rawArgs);
+      const projectId = await resolveProjectId(args, client);
+      return api.countTreeLeaves(client, projectId, {
+        treeId: getRequiredNumber(args, "treeId"),
+        search: getOptionalString(args, "search"),
+        deleted: getOptionalBoolean(args, "deleted"),
       });
     },
     get_test_case: async (rawArgs: unknown) => {

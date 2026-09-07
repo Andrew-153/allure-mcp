@@ -100,6 +100,91 @@ export function listTestCases(
   });
 }
 
+interface TreeNode {
+  id: number;
+  type: "GROUP" | "LEAF";
+  name: string;
+  parentNodeId?: number;
+  testCaseId?: number;
+  count?: number;
+  customFieldId?: number;
+  customFieldValueId?: number;
+  status?: { id: number; name: string };
+  automated?: boolean;
+}
+
+export interface ListTreeNodesResponse {
+  id?: number;
+  name?: string;
+  children?: {
+    content: TreeNode[];
+    empty: boolean;
+    totalElements: number;
+    totalPages: number;
+    number: number;
+    size: number;
+  };
+}
+
+export function buildContentSearchFilter(value: string): string {
+  const filter = [{ id: "content", value, type: "string" }];
+  return Buffer.from(JSON.stringify(filter), "utf8").toString("base64");
+}
+
+export async function listTreeNodes(
+  client: AllureApiClient,
+  projectId: number,
+  options: {
+    treeId: number;
+    parentNodeId?: number;
+    search?: string;
+    page?: number;
+    size?: number;
+    deleted?: boolean;
+  },
+): Promise<ListTreeNodesResponse> {
+  const params: QueryParams = {
+    treeId: options.treeId,
+    page: options.page ?? 0,
+    size: options.size ?? 100,
+    deleted: options.deleted ?? false,
+    sort: ["nodeSortOrder,asc", "name,asc"],
+  };
+  if (options.parentNodeId !== undefined) {
+    params.parentNodeId = options.parentNodeId;
+  }
+  if (options.search && options.search.length > 0) {
+    params.search = buildContentSearchFilter(options.search);
+  }
+  return client.get(
+    `/api/v2/project/${projectId}/test-case/tree/tree-node`,
+    params,
+  ) as Promise<ListTreeNodesResponse>;
+}
+
+export async function countTreeLeaves(
+  client: AllureApiClient,
+  projectId: number,
+  options: {
+    treeId: number;
+    search?: string;
+    deleted?: boolean;
+  },
+): Promise<{ filtered: number; total: number }> {
+  const params: QueryParams = {
+    treeId: options.treeId,
+    deleted: options.deleted ?? false,
+    sort: "name,asc",
+  };
+  if (options.search && options.search.length > 0) {
+    params.search = buildContentSearchFilter(options.search);
+  }
+  return client.get(
+    `/api/testcasetree/countleaves`,
+    { projectId, ...params },
+  ) as Promise<{ filtered: number; total: number }>;
+}
+
 export function searchTestCases(
   client: AllureApiClient,
   projectId: number,

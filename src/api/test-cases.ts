@@ -591,22 +591,32 @@ export function bulkSetTestCaseCustomFields(
 // add/remove, this single call drops the previous values of the listed
 // custom fields and substitutes them with the new ones — required when the
 // custom field is singleSelect and `add` would otherwise leave the old
-// value dangling. See /api/v2/test-case/bulk/cfv/replace.
-export function replaceTestCaseCustomFields(
+// value dangling. Tries /replace first, then /set (different Allure
+// builds ship with different verbs for the same operation).
+export async function replaceTestCaseCustomFields(
   client: AllureApiClient,
   projectId: number,
   testCaseIds: number[],
   payload: unknown,
 ): Promise<unknown> {
   const cfv = normalizeCustomFieldBulkAddPayload(payload);
-  return client.post("/api/v2/test-case/bulk/cfv/replace", {
+  const body = {
     selection: {
       projectId,
       testCasesInclude: testCaseIds,
       inverted: false,
     },
     cfv,
-  });
+  };
+  try {
+    return await client.post("/api/v2/test-case/bulk/cfv/replace", body);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/404/.test(message)) {
+      throw error;
+    }
+  }
+  return client.post("/api/v2/test-case/bulk/cfv/set", body);
 }
 
 // Convenience wrapper for the most common case: set one custom field on

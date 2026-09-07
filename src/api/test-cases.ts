@@ -13,6 +13,18 @@ function asRecord(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" ? (value as JsonRecord) : undefined;
 }
 
+// Coerce numeric ids that arrive as JSON strings (some MCP transports
+// round-trip integers as strings). Returns undefined when the value is not
+// a positive integer-shaped number.
+function coerceId(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 function toCustomFieldValueRef(
   value: unknown,
   index: number,
@@ -23,7 +35,7 @@ function toCustomFieldValueRef(
     throw new Error(`"payload[${index}]" must be an object.`);
   }
 
-  const id = typeof row.id === "number" ? row.id : undefined;
+  const id = coerceId(row.id);
   const name = typeof row.name === "string" ? row.name : undefined;
   if (id === undefined && name === undefined) {
     if (source === "values") {
@@ -54,9 +66,7 @@ export function normalizeCustomFieldBulkAddPayload(payload: unknown): CustomFiel
     }
 
     const customField = asRecord(row.customField);
-    const customFieldId = customField && typeof customField.id === "number"
-      ? customField.id
-      : undefined;
+    const customFieldId = customField ? coerceId(customField.id) : undefined;
     if (customFieldId === undefined) {
       throw new Error(`"payload[${index}].customField.id" must be a number.`);
     }
@@ -606,7 +616,8 @@ function toPerTestCaseCfvArray(cfv: Array<Record<string, unknown>>): Array<Recor
     }
     for (const v of values) {
       const flat: Record<string, unknown> = { customField: { id: cf.id } };
-      if (typeof (v as { id?: number }).id === "number") flat.id = (v as { id: number }).id;
+      const vId = coerceId((v as { id?: unknown }).id);
+      if (vId !== undefined) flat.id = vId;
       if (typeof (v as { name?: string }).name === "string") flat.name = (v as { name: string }).name;
       out.push(flat);
     }

@@ -405,10 +405,11 @@ export function createTestCaseTools(
     {
       name: "get_test_case_scenario",
       description:
-        "Get scenario for a test case. Reads the rich-tree storage (/step), which is " +
-        "the one the UI actually renders for migrated test cases — the legacy " +
-        "/scenario endpoint silently returns empty steps for those. Returns " +
-        "{ steps: [{ step, expectedResult?, steps? }] }.",
+        "Get scenario for a test case. Reads whichever storage actually has content: " +
+        "the rich tree (/step) for migrated test cases (the legacy /scenario endpoint " +
+        "silently returns empty for those), falling back to legacy /scenario when the " +
+        "rich tree is empty (true for most test cases, which are never migrated). " +
+        "Returns { steps: [{ step, expectedResult?, steps? }] }.",
       inputSchema: {
         type: "object" as const,
         properties: { id: { type: "number" } },

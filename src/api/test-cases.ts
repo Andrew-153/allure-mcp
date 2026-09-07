@@ -314,6 +314,12 @@ export async function getTestCaseRichSteps(
   return client.get(`/api/testcase/${id}/step`);
 }
 
+// Reads whichever storage actually has content. Most test cases in this
+// project are NEVER migrated, so the rich tree is legitimately empty
+// (root.children: []) and the real steps live in the legacy endpoint —
+// confirmed on case 15020 (2026-09-07): /step returned an empty tree while
+// /scenario had the one real step with its expectedResult. Reading only the
+// rich tree (the original version of this fix) silently hid that content.
 export async function getTestCaseScenario(
   client: AllureApiClient,
   id: number,
@@ -321,10 +327,16 @@ export async function getTestCaseScenario(
   const tree = await getTestCaseRichSteps(client, id);
   const nodes = tree.scenarioSteps ?? {};
   const rootIds = tree.root?.children ?? [];
-  const steps = rootIds
-    .map((rootId) => buildScenarioNode(nodes, rootId))
-    .filter((node): node is ScenarioNode => node !== undefined);
-  return { steps };
+
+  if (rootIds.length > 0) {
+    const steps = rootIds
+      .map((rootId) => buildScenarioNode(nodes, rootId))
+      .filter((node): node is ScenarioNode => node !== undefined);
+    return { steps };
+  }
+
+  const legacy = (await getTestCaseScenarioLegacy(client, id)) as { steps?: LegacyScenarioStep[] };
+  return { steps: (legacy.steps ?? []).map(fromLegacyStep) };
 }
 
 export function getTestCaseScenarioLegacy(client: AllureApiClient, id: number): Promise<unknown> {
@@ -335,6 +347,14 @@ interface LegacyScenarioStep {
   name: string;
   expectedResult?: string;
   steps?: LegacyScenarioStep[];
+}
+
+function fromLegacyStep(node: LegacyScenarioStep): ScenarioNode {
+  return {
+    step: node.name,
+    ...(node.expectedResult !== undefined ? { expectedResult: node.expectedResult } : {}),
+    ...(node.steps && node.steps.length > 0 ? { steps: node.steps.map(fromLegacyStep) } : {}),
+  };
 }
 
 function toLegacyStep(node: ScenarioNode): LegacyScenarioStep {

@@ -393,6 +393,7 @@ export interface AddStepPayload {
   step: string;
   afterId?: number;
   parentId?: number;
+  withExpectedResult?: boolean;
 }
 
 // Confirmed live via HTTP Toolkit/Playwright network capture on the real
@@ -402,31 +403,83 @@ export interface AddStepPayload {
 // withExpectedResult are QUERY params, not body fields, and the step text
 // goes in structured bodyJson (a flat "body" string was NOT what the real
 // UI sends, though the API silently accepted it too in earlier testing).
-// There is no per-step expectedResult on this call: the standard "regular"
-// style UI has exactly ONE overall Expected Result field on the TEST CASE
-// itself (see setTestCaseExpectedResult), not one per step. The nested
-// per-step expectedResultId structure seen on some older test cases
-// (5865/5866/5867) is not reproducible through this endpoint with
-// withExpectedResult=true — that was left at false throughout, and this
-// fork's writers only build the always-false shape below.
 function toBodyJson(text: string) {
   return { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] };
 }
 
-export function addTestCaseStep(
+export interface AddStepResult {
+  createdStepId: number;
+  expectedResultWrapperId?: number;
+}
+
+function extractExpectedResultWrapperId(rawResult: unknown, stepId: number): number | undefined {
+  const scenario = asRecord(rawResult)?.scenario;
+  const nodes = asRecord(scenario)?.scenarioSteps as Record<string, RawStepNode> | undefined;
+  return nodes?.[String(stepId)]?.expectedResultId;
+}
+
+// withExpectedResult=true (confirmed live, 2026-09-08, sandbox case 15054):
+// auto-creates the step's own per-step Expected Result — an EMPTY
+// placeholder child node (body literally "Expected Result", no children
+// yet), linked via the step's expectedResultId. The placeholder has no
+// text content of its own; the real ER text is a SEPARATE node added as
+// the placeholder's child (see addTestCaseStepWithExpectedResult) — same
+// two-level shape read by buildScenarioNode. This is the mechanism real
+// manually-authored multi-step scenarios use for a per-step assertion (as
+// opposed to setTestCaseExpectedResult's single overall test-case field).
+export async function addTestCaseStep(
   client: AllureApiClient,
   payload: AddStepPayload,
-): Promise<unknown> {
-  const { testCaseId, step, afterId, parentId } = payload;
-  return client.post(
+): Promise<AddStepResult> {
+  const { testCaseId, step, afterId, parentId, withExpectedResult } = payload;
+  const raw = await client.post(
     "/api/testcase/step",
-    { testCaseId, bodyJson: toBodyJson(step) },
     {
-      withExpectedResult: false,
-      ...(afterId !== undefined ? { afterId } : {}),
+      testCaseId,
+      bodyJson: toBodyJson(step),
       ...(parentId !== undefined ? { parentId } : {}),
     },
+    {
+      withExpectedResult: withExpectedResult ?? false,
+      ...(afterId !== undefined ? { afterId } : {}),
+    },
   );
+  const createdStepId = (asRecord(raw)?.createdStepId as number | undefined) ?? -1;
+  const wrapperId = withExpectedResult
+    ? extractExpectedResultWrapperId(raw, createdStepId)
+    : undefined;
+  return {
+    createdStepId,
+    ...(wrapperId !== undefined ? { expectedResultWrapperId: wrapperId } : {}),
+  };
+}
+
+// Add a step with its OWN per-step expected result — the mechanism real
+// multi-step scenarios use (confirmed live via a manually-authored step,
+// case 15186, 2026-09-07, and reproduced via direct API calls on sandbox
+// case 15054, 2026-09-08). Two calls under the hood: create the step with
+// withExpectedResult=true (auto-creates an EMPTY "Expected Result"
+// placeholder node, linked via expectedResultId), then add the real ER
+// text as a normal step whose parentId is that placeholder's id — that
+// becomes the placeholder's child and is what buildScenarioNode reads
+// back as the step's expectedResult.
+export async function addTestCaseStepWithExpectedResult(
+  client: AllureApiClient,
+  payload: { testCaseId: number; step: string; expectedResult: string; afterId?: number },
+): Promise<AddStepResult> {
+  const created = await addTestCaseStep(client, { ...payload, withExpectedResult: true });
+  if (created.expectedResultWrapperId === undefined) {
+    throw new Error(
+      "withExpectedResult=true did not produce the expected placeholder node shape — " +
+        "Allure API behavior may have changed; inspect the raw response before retrying.",
+    );
+  }
+  await addTestCaseStep(client, {
+    testCaseId: payload.testCaseId,
+    step: payload.expectedResult,
+    parentId: created.expectedResultWrapperId,
+  });
+  return created;
 }
 
 // expectedResult is intentionally NOT supported here — PATCHing it onto a
@@ -471,7 +524,7 @@ async function writeStepsToRichTree(
   id: number,
   steps: ScenarioNode[],
 ): Promise<unknown[]> {
-  const created: unknown[] = [];
+  const created: AddStepResult[] = [];
   let afterId: number | undefined;
   for (const node of steps) {
     if (node.steps && node.steps.length > 0) {
@@ -480,33 +533,22 @@ async function writeStepsToRichTree(
           "top-level steps. Use a not-yet-migrated test case (legacy storage) for nested steps.",
       );
     }
-    const stepResult = await addTestCaseStep(client, {
-      testCaseId: id,
-      step: node.step,
-      afterId,
-    });
-    const createdId = asRecord(stepResult)?.id;
-    afterId = typeof createdId === "number" ? createdId : afterId;
+    // Per-step expected result uses the withExpectedResult=true mechanism
+    // (see addTestCaseStepWithExpectedResult) — confirmed live to match
+    // what manually-authored multi-step scenarios actually use. A step
+    // without its own expectedResult is just a plain step; the test
+    // case's single overall field (setTestCaseExpectedResult) is a
+    // separate, explicit call, not an automatic side effect here.
+    const stepResult = node.expectedResult
+      ? await addTestCaseStepWithExpectedResult(client, {
+          testCaseId: id,
+          step: node.step,
+          expectedResult: node.expectedResult,
+          afterId,
+        })
+      : await addTestCaseStep(client, { testCaseId: id, step: node.step, afterId });
+    afterId = stepResult.createdStepId;
     created.push(stepResult);
-  }
-
-  // A "regular"-style test case has exactly one overall Expected Result
-  // field on the TEST CASE itself, not one per rich-tree step (confirmed
-  // live via the actual UI, 2026-09-07) — collapse whatever expectedResult
-  // the caller attached to individual steps into that one field.
-  const expectedResults = steps
-    .map((s) => s.expectedResult)
-    .filter((er): er is string => Boolean(er));
-  if (expectedResults.length > 1) {
-    throw new Error(
-      "Multiple steps each with their own expectedResult are not supported when writing " +
-        "to the rich tree — it has exactly one overall Expected Result field for the whole " +
-        "test case. Put a single expectedResult on the last step, or use a not-yet-migrated " +
-        "test case (legacy storage) for true per-step results.",
-    );
-  }
-  if (expectedResults.length === 1) {
-    await setTestCaseExpectedResult(client, id, expectedResults[0]);
   }
 
   return created;

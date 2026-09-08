@@ -437,9 +437,10 @@ export function createTestCaseTools(
         "content — migrate deliberately first via migrate_test_case_scenario if you want it " +
         "on rich instead). " +
         "Nested steps[] are only supported in legacy mode. Rich-tree writes are flat, " +
-        "top-level steps only, and rich-tree test cases have exactly ONE overall Expected " +
-        "Result field (not one per step) — put at most one expectedResult across all steps " +
-        "(conventionally on the last one); more than one throws. " +
+        "top-level steps only. Each step's own expectedResult (if given) becomes a genuine " +
+        "per-step assertion — the same nested \"Expected Result\" node structure real " +
+        "manually-authored multi-step scenarios use — separate from the test case's single " +
+        "overall field (see set_test_case_expected_result). " +
         "Returns { mode: \"legacy\" | \"rich\", result }.",
       inputSchema: {
         type: "object" as const,
@@ -467,13 +468,16 @@ export function createTestCaseTools(
         "Add a single step to a migrated (rich-tree) test case's scenario. One node at a " +
         "time — nested sub-steps are not supported here, only in legacy mode. " +
         "Pass afterId to insert after a specific existing step, or omit to append. " +
-        "No expectedResult here — rich-tree test cases have exactly one overall Expected " +
-        "Result on the test case itself; use set_test_case_expected_result for that.",
+        "Pass expectedResult to also attach a per-step assertion to this specific step " +
+        "(a genuine nested \"Expected Result\" node, matching what manually-authored " +
+        "multi-step scenarios use) — separate from the test case's single overall field " +
+        "(set_test_case_expected_result).",
       inputSchema: {
         type: "object" as const,
         properties: {
           testCaseId: { type: "number" },
           step: { type: "string" },
+          expectedResult: { type: "string", description: "Optional per-step expected result." },
           afterId: { type: "number", description: "Existing step id to insert after." },
           parentId: { type: "number", description: "Parent step id, for a nested sub-step." },
         },
@@ -957,10 +961,22 @@ export function createTestCaseTools(
     },
     add_test_case_step: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
+      const testCaseId = getRequiredId(args, "testCaseId");
+      const step = getRequiredString(args, "step");
+      const afterId = getOptionalNumber(args, "afterId");
+      const expectedResult = getOptionalString(args, "expectedResult");
+      if (expectedResult !== undefined) {
+        return api.addTestCaseStepWithExpectedResult(client, {
+          testCaseId,
+          step,
+          expectedResult,
+          afterId,
+        });
+      }
       return api.addTestCaseStep(client, {
-        testCaseId: getRequiredId(args, "testCaseId"),
-        step: getRequiredString(args, "step"),
-        afterId: getOptionalNumber(args, "afterId"),
+        testCaseId,
+        step,
+        afterId,
         parentId: getOptionalNumber(args, "parentId"),
       });
     },

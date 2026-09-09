@@ -582,6 +582,18 @@ async function writeStepsToRichTree(
 //     migrating this test case first is a deliberate, separate decision
 //     (call migrate_test_case_scenario explicitly), not an automatic side
 //     effect of "set".
+// Deletes every existing top-level rich-tree step. deleteTestCaseStep
+// cascades to a step's children (confirmed live: deleting a step also
+// removes its nested Expected Result wrapper+content), so this alone is
+// enough to fully clear a test case's rich tree before writing fresh
+// content — required for "set" to actually mean replace.
+async function clearRichTree(client: AllureApiClient, tree: RawStepTree): Promise<void> {
+  const rootIds = tree.root?.children ?? [];
+  for (const stepId of rootIds) {
+    await deleteTestCaseStep(client, stepId);
+  }
+}
+
 export async function setTestCaseScenario(
   client: AllureApiClient,
   id: number,
@@ -591,6 +603,13 @@ export async function setTestCaseScenario(
   const hasRichContent = (tree.root?.children?.length ?? 0) > 0;
 
   if (hasRichContent) {
+    // BUG FIXED 2026-09-08: this used to call writeStepsToRichTree
+    // directly, which only ADDS steps — calling set_test_case_scenario a
+    // second time on an already-migrated test case silently duplicated
+    // its steps instead of replacing them (confirmed live: 5 real test
+    // cases ended up with doubled/tripled steps this way). "set" must
+    // mean replace, so the existing tree is cleared first.
+    await clearRichTree(client, tree);
     return { mode: "rich", result: await writeStepsToRichTree(client, id, steps) };
   }
 

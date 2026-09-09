@@ -3,6 +3,7 @@ import * as api from "../api/test-cases.js";
 import type { ToolBundle } from "./types.js";
 import {
   asObject,
+  coerceJson,
   ensureProjectIdInPayload,
   getOptionalBoolean,
   getObjectPayload,
@@ -20,13 +21,14 @@ type BulkTag = { id?: number; name?: string };
 type BulkExternalLink = { url: string; name?: string; type?: string };
 
 function asArray(value: unknown): unknown[] | undefined {
-  if (value === undefined) {
+  const coerced = coerceJson(value);
+  if (coerced === undefined) {
     return undefined;
   }
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(coerced)) {
     throw new Error("Expected an array.");
   }
-  return value;
+  return coerced;
 }
 
 function getBulkIdList(
@@ -953,7 +955,7 @@ export function createTestCaseTools(
     set_test_case_scenario: async (rawArgs: unknown) => {
       const args = asObject(rawArgs);
       const id = getRequiredId(args);
-      const steps = args.steps;
+      const steps = coerceJson(args.steps);
       if (!Array.isArray(steps)) {
         throw new Error("\"steps\" must be an array.");
       }

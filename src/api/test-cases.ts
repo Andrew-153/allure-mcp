@@ -25,6 +25,21 @@ function coerceId(value: unknown): number | undefined {
   return undefined;
 }
 
+// Same transport quirk, for arrays/objects arriving as a JSON-encoded
+// string instead of the real value (confirmed live: another agent hit
+// "payload must be an array" on bulk custom-field calls whose payload was
+// a JSON string). Only attempts a parse when it actually looks like JSON.
+function coerceJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 function toCustomFieldValueRef(
   value: unknown,
   index: number,
@@ -52,7 +67,8 @@ function toCustomFieldValueRef(
   };
 }
 
-export function normalizeCustomFieldBulkAddPayload(payload: unknown): CustomFieldBulkAddValue[] {
+export function normalizeCustomFieldBulkAddPayload(payloadInput: unknown): CustomFieldBulkAddValue[] {
+  const payload = coerceJsonValue(payloadInput);
   if (!Array.isArray(payload)) {
     throw new Error("\"payload\" must be an array.");
   }

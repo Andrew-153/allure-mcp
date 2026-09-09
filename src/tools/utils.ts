@@ -1,6 +1,27 @@
 import type { AllureApiClient } from "../client.js";
 export type ToolArgs = Record<string, unknown>;
 
+// Some MCP transports round-trip arrays/objects as JSON-encoded strings
+// (same family of quirk as the numeric-id coercion in api/test-cases.ts —
+// confirmed by another agent hitting "payload must be an object" /
+// "steps must be an array" on calls whose payload was, on inspection, a
+// JSON string). Only attempts a parse when the string actually looks like
+// JSON, so a legitimate string value is never silently reinterpreted.
+export function coerceJson(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 export function asObject(args: unknown): ToolArgs {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return {};
@@ -61,7 +82,7 @@ export function getOptionalStringArray(
   args: ToolArgs,
   key: string,
 ): string[] | undefined {
-  const value = args[key];
+  const value = coerceJson(args[key]);
   if (value === undefined) {
     return undefined;
   }
@@ -137,7 +158,7 @@ export function getObjectPayload(
   args: ToolArgs,
   key = "payload",
 ): Record<string, unknown> {
-  const payload = args[key];
+  const payload = coerceJson(args[key]);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error(`"${key}" must be an object.`);
   }
@@ -161,7 +182,7 @@ export function getOptionalObjectPayload(
   args: ToolArgs,
   key = "payload",
 ): Record<string, unknown> | undefined {
-  const payload = args[key];
+  const payload = coerceJson(args[key]);
   if (payload === undefined) {
     return undefined;
   }

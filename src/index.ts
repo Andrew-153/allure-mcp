@@ -13,7 +13,11 @@ function formatToolResult(result: unknown): string {
     return "OK";
   }
   if (typeof result === "string") {
-    return result;
+    // An empty text content block is rejected as invalid by some MCP
+    // clients (confirmed by another agent's report + reproduced via
+    // /api/v2/test-case/bulk/cfv/add, which returns 200 with a genuinely
+    // empty body) — never emit "", always something non-empty.
+    return result.length > 0 ? result : "OK";
   }
   return JSON.stringify(result, null, 2);
 }

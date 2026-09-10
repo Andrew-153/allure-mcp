@@ -102,7 +102,17 @@ export class AllureApiClient {
         return (await response.json()) as T;
       }
 
-      return (await response.text()) as T;
+      const text = await response.text();
+      // Some endpoints return 200 with a genuinely empty body and no
+      // Content-Type (confirmed live: /api/v2/test-case/bulk/cfv/add) —
+      // treat that the same as 204/no-content instead of surfacing "" as
+      // the result. An MCP tool response with an empty text content block
+      // was reported by another agent's client as invalid, even though
+      // Claude Code's own harness tolerated it silently.
+      if (text.length === 0) {
+        return undefined as T;
+      }
+      return text as T;
     }
 
     throw new Error(`Allure API ${method} ${path} failed after retries.`);
